@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/hooks"
@@ -35,25 +36,143 @@ type PruneResult struct {
 	FreedBytes       int64
 }
 
+// PrunePoolResult records the prune result for one managed pool directory.
+type PrunePoolResult struct {
+	PoolDir string
+	Result  PruneResult
+}
+
+// PruneAllResult records per-pool and aggregate prune results under a pool root.
+type PruneAllResult struct {
+	PoolRoot string
+	Pools    []PrunePoolResult
+	Result   PruneResult
+}
+
+type plannedPrunePool struct {
+	PoolDir string
+	Plan    prunePlan
+}
+
 // Prune finds stale idle managed worktrees and optionally deletes them.
 // A stale worktree is clean, unused, unreserved, and merged into the default
 // branch ref selected by git.DefaultBranchMergeRef.
 // In dryRun mode Prune reports candidates and reclaimable bytes without deleting.
 func Prune(repoRoot, poolDir string, dryRun bool, preDestroy []string) (PruneResult, error) {
+	return prunePool(poolDir, dryRun, preDestroy, singleRepoPruneContextResolver(repoRoot), false)
+}
+
+// PrunePool prunes one pool by deriving each worktree's repository context from
+// git metadata.
+// Worktrees whose repository or default branch cannot be resolved are reported
+// as skipped.
+func PrunePool(poolDir string, dryRun bool, preDestroy []string) (PruneResult, error) {
+	return prunePool(poolDir, dryRun, preDestroy, worktreePruneContextResolver(), true)
+}
+
+// PruneAll prunes every managed pool directly under poolRoot and aggregates the
+// results.
+// When dryRun is false, all pools are planned before any worktree is deleted.
+func PruneAll(poolRoot string, dryRun bool, preDestroy []string) (PruneAllResult, error) {
+	poolDirs, err := prunePoolDirs(poolRoot)
+	if err != nil {
+		return PruneAllResult{}, err
+	}
+
+	result := PruneAllResult{
+		PoolRoot: poolRoot,
+		Pools:    make([]PrunePoolResult, 0, len(poolDirs)),
+	}
+	plans := make([]plannedPrunePool, 0, len(poolDirs))
+	resolveContext := worktreePruneContextResolver()
+	for _, poolDir := range poolDirs {
+		plan, err := planPrunePool(poolDir, resolveContext, true)
+		if err != nil {
+			return PruneAllResult{}, err
+		}
+		plans = append(plans, plannedPrunePool{
+			PoolDir: poolDir,
+			Plan:    plan,
+		})
+		addPrunePoolResult(&result, poolDir, plan.Result)
+	}
+	if dryRun || len(result.Result.Candidates) == 0 {
+		return result, nil
+	}
+
+	executed := PruneAllResult{
+		PoolRoot: poolRoot,
+		Pools:    make([]PrunePoolResult, 0, len(plans)),
+	}
+	for _, planned := range plans {
+		poolResult := planned.Plan.Result
+		if len(planned.Plan.Result.Candidates) > 0 {
+			var err error
+			poolResult, err = executePrune(planned.PoolDir, planned.Plan, preDestroy)
+			if err != nil {
+				return PruneAllResult{}, err
+			}
+		}
+		addPrunePoolResult(&executed, planned.PoolDir, poolResult)
+	}
+	return executed, nil
+}
+
+func addPrunePoolResult(all *PruneAllResult, poolDir string, poolResult PruneResult) {
+	all.Pools = append(all.Pools, PrunePoolResult{
+		PoolDir: poolDir,
+		Result:  poolResult,
+	})
+	all.Result.Candidates = append(all.Result.Candidates, poolResult.Candidates...)
+	all.Result.Pruned = append(all.Result.Pruned, poolResult.Pruned...)
+	all.Result.Skipped = append(all.Result.Skipped, poolResult.Skipped...)
+	all.Result.ReclaimableBytes += poolResult.ReclaimableBytes
+	all.Result.FreedBytes += poolResult.FreedBytes
+}
+
+func prunePool(poolDir string, dryRun bool, preDestroy []string, resolveContext pruneContextResolver, skipContextErrors bool) (PruneResult, error) {
+	plan, err := planPrunePool(poolDir, resolveContext, skipContextErrors)
+	if err != nil {
+		return PruneResult{}, err
+	}
+	if dryRun || len(plan.Result.Candidates) == 0 {
+		return plan.Result, nil
+	}
+
+	return executePrune(poolDir, plan, preDestroy)
+}
+
+func planPrunePool(poolDir string, resolveContext pruneContextResolver, skipContextErrors bool) (prunePlan, error) {
 	entries, err := pruneSnapshot(poolDir)
 	if err != nil {
-		return PruneResult{}, err
+		return prunePlan{}, err
 	}
+	return planPrune(entries, resolveContext, skipContextErrors)
+}
 
-	plan, defaultRef, err := planPrune(repoRoot, entries)
+func prunePoolDirs(poolRoot string) ([]string, error) {
+	entries, err := os.ReadDir(poolRoot)
 	if err != nil {
-		return PruneResult{}, err
-	}
-	if dryRun || len(plan.Candidates) == 0 {
-		return plan, nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
-	return executePrune(repoRoot, poolDir, defaultRef, plan, preDestroy)
+	var poolDirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		poolDir := filepath.Join(poolRoot, entry.Name())
+		if _, err := os.Stat(stateFilePath(poolDir)); err == nil {
+			poolDirs = append(poolDirs, poolDir)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	sort.Strings(poolDirs)
+	return poolDirs, nil
 }
 
 func pruneSnapshot(poolDir string) ([]WorktreeEntry, error) {
@@ -75,37 +194,53 @@ func pruneSnapshot(poolDir string) ([]WorktreeEntry, error) {
 	return entries, err
 }
 
-func planPrune(repoRoot string, entries []WorktreeEntry) (PruneResult, string, error) {
-	var result PruneResult
-	var defaultRef string
-	resolveDefaultRef := func() (string, error) {
-		if defaultRef != "" {
-			return defaultRef, nil
-		}
-		ref, err := resolvePruneDefaultRef(repoRoot)
-		if err != nil {
-			return "", err
-		}
-		defaultRef = ref
-		return defaultRef, nil
-	}
+type pruneContext struct {
+	RepoRoot   string
+	DefaultRef string
+}
 
+type pruneContextResolver func(WorktreeEntry) (pruneContext, error)
+
+type plannedPruneWorktree struct {
+	Worktree PruneWorktree
+	Context  pruneContext
+}
+
+type prunePlan struct {
+	Result   PruneResult
+	Planned  map[string]plannedPruneWorktree
+	Reserved map[string]pruneContext
+}
+
+func planPrune(entries []WorktreeEntry, resolveContext pruneContextResolver, skipContextErrors bool) (prunePlan, error) {
+	plan := prunePlan{
+		Planned: make(map[string]plannedPruneWorktree),
+	}
 	for _, wt := range entries {
-		worktree, skipped, stale, err := analyzePruneCandidate(resolveDefaultRef, wt)
+		worktree, skipped, stale, context, err := analyzePruneCandidate(resolveContext, wt)
 		if err != nil {
-			return PruneResult{}, "", err
+			if skipContextErrors {
+				skipped.Reason = fmt.Sprintf("cannot resolve default branch: %v", err)
+				plan.Result.Skipped = append(plan.Result.Skipped, skipped)
+				continue
+			}
+			return prunePlan{}, err
 		}
 		if !stale {
 			continue
 		}
 		if skipped.Reason != "" {
-			result.Skipped = append(result.Skipped, skipped)
+			plan.Result.Skipped = append(plan.Result.Skipped, skipped)
 			continue
 		}
-		result.Candidates = append(result.Candidates, worktree)
-		result.ReclaimableBytes += worktree.Bytes
+		plan.Result.Candidates = append(plan.Result.Candidates, worktree)
+		plan.Result.ReclaimableBytes += worktree.Bytes
+		plan.Planned[worktree.Path] = plannedPruneWorktree{
+			Worktree: worktree,
+			Context:  context,
+		}
 	}
-	return result, defaultRef, nil
+	return plan, nil
 }
 
 func resolvePruneDefaultRef(repoRoot string) (string, error) {
@@ -119,14 +254,50 @@ func resolvePruneDefaultRef(repoRoot string) (string, error) {
 	return defaultRef, nil
 }
 
-func executePrune(repoRoot, poolDir, defaultRef string, plan PruneResult, preDestroy []string) (PruneResult, error) {
-	result := PruneResult{
-		Skipped: append([]PruneSkipped(nil), plan.Skipped...),
+func singleRepoPruneContextResolver(repoRoot string) pruneContextResolver {
+	var defaultRef string
+	return func(WorktreeEntry) (pruneContext, error) {
+		if defaultRef == "" {
+			ref, err := resolvePruneDefaultRef(repoRoot)
+			if err != nil {
+				return pruneContext{}, err
+			}
+			defaultRef = ref
+		}
+		return pruneContext{RepoRoot: repoRoot, DefaultRef: defaultRef}, nil
 	}
+}
 
-	planned := make(map[string]PruneWorktree, len(plan.Candidates))
-	for _, wt := range plan.Candidates {
-		planned[wt.Path] = wt
+func worktreePruneContextResolver() pruneContextResolver {
+	contexts := make(map[string]pruneContext)
+	return func(wt WorktreeEntry) (pruneContext, error) {
+		repoRoot, err := git.FindMainRepoRootFrom(wt.Path)
+		if err != nil {
+			return pruneContext{}, fmt.Errorf("resolve repository for %s: %w", wt.Path, err)
+		}
+		if context, ok := contexts[repoRoot]; ok {
+			return context, nil
+		}
+
+		defaultRef, err := resolvePruneDefaultRef(repoRoot)
+		if err != nil {
+			return pruneContext{}, err
+		}
+		context := pruneContext{RepoRoot: repoRoot, DefaultRef: defaultRef}
+		contexts[repoRoot] = context
+		return context, nil
+	}
+}
+
+func fixedPruneContextResolver(context pruneContext) pruneContextResolver {
+	return func(WorktreeEntry) (pruneContext, error) {
+		return context, nil
+	}
+}
+
+func executePrune(poolDir string, plan prunePlan, preDestroy []string) (PruneResult, error) {
+	result := PruneResult{
+		Skipped: append([]PruneSkipped(nil), plan.Result.Skipped...),
 	}
 
 	var reserved []WorktreeEntry
@@ -138,12 +309,12 @@ func executePrune(repoRoot, poolDir, defaultRef string, plan PruneResult, preDes
 		state = healState(state)
 
 		for i := range state.Worktrees {
-			plannedWorktree, ok := planned[state.Worktrees[i].Path]
+			plannedWorktree, ok := plan.Planned[state.Worktrees[i].Path]
 			if !ok {
 				continue
 			}
 
-			worktree, skipped, stale, err := analyzePruneCandidate(fixedPruneDefaultRef(defaultRef), state.Worktrees[i])
+			worktree, skipped, stale, context, err := analyzePruneCandidate(fixedPruneContextResolver(plannedWorktree.Context), state.Worktrees[i])
 			if err != nil {
 				return err
 			}
@@ -154,12 +325,16 @@ func executePrune(repoRoot, poolDir, defaultRef string, plan PruneResult, preDes
 				result.Skipped = append(result.Skipped, skipped)
 				continue
 			}
-			worktree.Bytes = plannedWorktree.Bytes
+			worktree.Bytes = plannedWorktree.Worktree.Bytes
 			state.Worktrees[i].Destroying = true
 			if err := reserveOwner(&state.Worktrees[i]); err != nil {
 				return err
 			}
 			reserved = append(reserved, state.Worktrees[i])
+			if plan.Reserved == nil {
+				plan.Reserved = make(map[string]pruneContext)
+			}
+			plan.Reserved[state.Worktrees[i].Path] = context
 			result.Candidates = append(result.Candidates, worktree)
 			result.ReclaimableBytes += worktree.Bytes
 		}
@@ -192,7 +367,8 @@ func executePrune(repoRoot, poolDir, defaultRef string, plan PruneResult, preDes
 				continue
 			}
 
-			worktree, skipped := finalPruneSafetyCheck(defaultRef, state.Worktrees[idx])
+			context := plan.Reserved[reservation.Path]
+			worktree, skipped := finalPruneSafetyCheck(context.DefaultRef, state.Worktrees[idx])
 			if skipped.Reason != "" {
 				clearReservation(&state.Worktrees[idx])
 				result.Skipped = append(result.Skipped, skipped)
@@ -200,12 +376,12 @@ func executePrune(repoRoot, poolDir, defaultRef string, plan PruneResult, preDes
 			}
 
 			if worktree.Bytes == 0 {
-				if plannedWorktree, ok := planned[worktree.Path]; ok {
-					worktree.Bytes = plannedWorktree.Bytes
+				if plannedWorktree, ok := plan.Planned[worktree.Path]; ok {
+					worktree.Bytes = plannedWorktree.Worktree.Bytes
 				}
 			}
 
-			if err := git.RemoveCleanWorktree(repoRoot, worktree.Path); err != nil {
+			if err := git.RemoveCleanWorktree(context.RepoRoot, worktree.Path); err != nil {
 				clearReservation(&state.Worktrees[idx])
 				result.Skipped = append(result.Skipped, PruneSkipped{
 					Name:   worktree.Name,
@@ -244,30 +420,22 @@ func executePrune(repoRoot, poolDir, defaultRef string, plan PruneResult, preDes
 	return result, nil
 }
 
-type pruneRefResolver func() (string, error)
-
-func fixedPruneDefaultRef(defaultRef string) pruneRefResolver {
-	return func() (string, error) {
-		return defaultRef, nil
-	}
-}
-
-func analyzePruneCandidate(resolveDefaultRef pruneRefResolver, wt WorktreeEntry) (PruneWorktree, PruneSkipped, bool, error) {
+func analyzePruneCandidate(resolveContext pruneContextResolver, wt WorktreeEntry) (PruneWorktree, PruneSkipped, bool, pruneContext, error) {
 	worktree := PruneWorktree{Name: wt.Name, Path: wt.Path}
 	skipped := PruneSkipped{Name: wt.Name, Path: wt.Path}
 
 	if wt.Destroying || ownerAlive(wt) {
-		return worktree, skipped, false, nil
+		return worktree, skipped, false, pruneContext{}, nil
 	}
 	inUse, err := process.IsWorktreeInUse(wt.Path)
 	if err != nil {
 		skipped.Reason = fmt.Sprintf("cannot check processes: %v", err)
-		return worktree, skipped, true, nil
+		return worktree, skipped, true, pruneContext{}, nil
 	}
 	if inUse {
-		return worktree, skipped, false, nil
+		return worktree, skipped, false, pruneContext{}, nil
 	}
-	return analyzeIdleWorktree(resolveDefaultRef, worktree, skipped)
+	return analyzeIdleWorktree(resolveContext, wt, worktree, skipped)
 }
 
 func finalPruneSafetyCheck(defaultRef string, wt WorktreeEntry) (PruneWorktree, PruneSkipped) {
@@ -283,46 +451,47 @@ func finalPruneSafetyCheck(defaultRef string, wt WorktreeEntry) (PruneWorktree, 
 		skipped.Reason = "in use"
 		return worktree, skipped
 	}
-	worktree, skipped, _, err = analyzeIdleWorktree(fixedPruneDefaultRef(defaultRef), worktree, skipped)
+	context := pruneContext{DefaultRef: defaultRef}
+	worktree, skipped, _, _, err = analyzeIdleWorktree(fixedPruneContextResolver(context), wt, worktree, skipped)
 	if err != nil {
 		skipped.Reason = fmt.Sprintf("cannot prove HEAD is merged into default branch: %v", err)
 	}
 	return worktree, skipped
 }
 
-func analyzeIdleWorktree(resolveDefaultRef pruneRefResolver, worktree PruneWorktree, skipped PruneSkipped) (PruneWorktree, PruneSkipped, bool, error) {
+func analyzeIdleWorktree(resolveContext pruneContextResolver, wt WorktreeEntry, worktree PruneWorktree, skipped PruneSkipped) (PruneWorktree, PruneSkipped, bool, pruneContext, error) {
 	dirty, err := git.IsDirty(worktree.Path)
 	if err != nil {
 		skipped.Reason = fmt.Sprintf("cannot check status: %v", err)
-		return worktree, skipped, true, nil
+		return worktree, skipped, true, pruneContext{}, nil
 	}
 	if dirty {
 		skipped.Reason = "uncommitted changes"
-		return worktree, skipped, true, nil
+		return worktree, skipped, true, pruneContext{}, nil
 	}
 
-	defaultRef, err := resolveDefaultRef()
+	context, err := resolveContext(wt)
 	if err != nil {
-		return worktree, skipped, true, err
+		return worktree, skipped, true, pruneContext{}, err
 	}
 
-	merged, err := git.IsHeadMergedIntoRef(worktree.Path, defaultRef)
+	merged, err := git.IsHeadMergedIntoRef(worktree.Path, context.DefaultRef)
 	if err != nil {
 		skipped.Reason = fmt.Sprintf("cannot prove HEAD is merged into default branch: %v", err)
-		return worktree, skipped, true, nil
+		return worktree, skipped, true, context, nil
 	}
 	if !merged {
-		skipped.Reason = fmt.Sprintf("HEAD is not merged into %s", defaultRef)
-		return worktree, skipped, true, nil
+		skipped.Reason = fmt.Sprintf("HEAD is not merged into %s", context.DefaultRef)
+		return worktree, skipped, true, context, nil
 	}
 
 	bytes, err := dirSize(filepath.Dir(worktree.Path))
 	if err != nil {
 		skipped.Reason = fmt.Sprintf("cannot measure size: %v", err)
-		return worktree, skipped, true, nil
+		return worktree, skipped, true, context, nil
 	}
 	worktree.Bytes = bytes
-	return worktree, skipped, true, nil
+	return worktree, skipped, true, context, nil
 }
 
 func clearReservation(wt *WorktreeEntry) {

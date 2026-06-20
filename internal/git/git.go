@@ -16,6 +16,17 @@ func FindRepoRootFrom(dir string) (string, error) {
 	return runGit(dir, "rev-parse", "--show-toplevel")
 }
 
+// FindMainRepoRootFrom returns the main repository root for dir.
+// For linked worktrees, it resolves the worktree root back to the owning
+// repository.
+func FindMainRepoRootFrom(dir string) (string, error) {
+	repoRoot, err := FindRepoRootFrom(dir)
+	if err != nil {
+		return "", err
+	}
+	return mainRepoRoot(repoRoot), nil
+}
+
 func GetDefaultBranch(repoRoot string) (string, error) {
 	mainRoot := mainRepoRoot(repoRoot)
 

@@ -84,7 +84,8 @@ make install
 
 ## How It Works
 
-Treehouse manages a **pool of git worktrees** per repository, stored under `~/.treehouse/`.
+Treehouse manages a **pool of git worktrees** per repository, stored under the configured treehouse root.
+The default treehouse root is `~/.treehouse/`.
 
 ```
   treehouse
@@ -133,6 +134,7 @@ Treehouse manages a **pool of git worktrees** per repository, stored under `~/.t
 - **In-use detection** — treehouse scans running processes and short-lived owner reservations to determine which worktrees are in-use. Reservations are persisted only while `get`, `destroy`, and `prune` lifecycle work is running.
 - **Dirty detection** - treehouse treats tracked changes and untracked files as dirty, even when repository config hides untracked files from normal `git status` output.
 - **Safe pruning** - `treehouse prune` removes only idle managed worktrees whose HEAD is already merged into the default branch and whose working tree is clean.
+  `treehouse prune --all` applies the same safety checks across every managed pool under the user-level treehouse root.
   It is a dry run unless you pass `--yes`.
 
 ## CLI Reference
@@ -143,7 +145,8 @@ Treehouse manages a **pool of git worktrees** per repository, stored under `~/.t
 | `treehouse get`            | Acquire a worktree from the pool                     |
 | `treehouse status`         | Show pool status (highlights your current worktree)  |
 | `treehouse return [path]`  | Terminate lingering worktree processes and return it to the pool |
-| `treehouse prune`          | Dry-run removal of stale idle worktrees to reclaim disk space |
+| `treehouse prune`          | Dry-run removal of stale idle worktrees in the current repo pool |
+| `treehouse prune --all`    | Dry-run removal of stale idle worktrees across every managed pool |
 | `treehouse destroy [path]` | Remove a worktree from the pool                      |
 | `treehouse init`           | Create a default `treehouse.toml` config file        |
 | `treehouse update`         | Update treehouse to the latest version               |
@@ -154,6 +157,8 @@ Treehouse manages a **pool of git worktrees** per repository, stored under `~/.t
 | --------- | --------- | --------------------------------- |
 | `return`  | `--force` | Clean, reset, and return without prompting |
 | `prune`   | `--yes`   | Delete stale idle worktrees instead of doing a dry run |
+| `prune`   | `--all`   | Sweep every managed pool under the user-level treehouse root |
+| `prune`   | `--global` | Alias for `--all` |
 | `destroy` | `--force` | Force destroy even if in-use      |
 | `destroy` | `--all`   | Destroy all worktrees in the pool |
 
@@ -162,6 +167,11 @@ Treehouse manages a **pool of git worktrees** per repository, stored under `~/.t
 `treehouse prune` is a dry run by default.
 It lists stale idle managed worktrees that would be deleted and shows the reclaimable disk space.
 Pass `treehouse prune --yes` to delete those worktrees.
+
+By default, prune only inspects the current repository's pool and must be run inside a git repo.
+Pass `treehouse prune --all` or `treehouse prune --global` to inspect every managed pool under the user-level treehouse root from any directory.
+Global prune reads the user-level config and hooks, derives each worktree's owning repository from git metadata, then fetches and checks merge safety against that repository.
+Pass `treehouse prune --all --yes` to delete only the globally safe candidates.
 
 Prune ignores worktrees that are currently in use or reserved by another lifecycle operation.
 It skips idle worktrees that are unsafe to remove and prints the skip reason, such as uncommitted tracked or untracked changes, or a HEAD commit that is not merged into the default branch.
@@ -179,9 +189,16 @@ Create a repo config file with `treehouse init`, or add one manually:
 ```toml
 # Maximum number of worktrees in the pool
 max_trees = 16
+
+# Optional worktree root directory.
+# Empty uses $HOME/.treehouse.
+# Relative paths are resolved from the repo root for repo-scoped commands.
+# Use an absolute user-level root for treehouse prune --all.
+# root = "$HOME/worktrees"
 ```
 
 The repo-level config takes precedence for repo-safe settings.
+`treehouse prune --all` can run without a repository, so it uses only the user-level config and does not read per-repo `treehouse.toml` files while sweeping.
 If no config is found, the default pool size is 16.
 
 ### Hooks
