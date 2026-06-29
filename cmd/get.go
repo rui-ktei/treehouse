@@ -37,10 +37,17 @@ running inside it, until you release it with 'treehouse return <path>'.`,
 }
 
 func init() {
-	getCmd.Flags().BoolVar(&getLease, "lease", false, "Durably lease a worktree without opening a subshell; print only its path to stdout")
-	getCmd.Flags().StringVar(&getLeaseHolder, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
-	getCmd.Flags().StringVar(&getBranch, "branch", "", "Starting ref (branch, tag, or commit) for the worktree's HEAD; not sticky, return resets to the default branch")
+	// Register on both getCmd and rootCmd so the bare `treehouse` alias accepts
+	// the same flags as `treehouse get`, which it delegates to.
+	addGetFlags(getCmd)
+	addGetFlags(rootCmd)
 	rootCmd.AddCommand(getCmd)
+}
+
+func addGetFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&getLease, "lease", false, "Durably lease a worktree without opening a subshell; print only its path to stdout")
+	cmd.Flags().StringVar(&getLeaseHolder, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
+	cmd.Flags().StringVar(&getBranch, "branch", "", "Starting ref (branch, tag, or commit) for the worktree's HEAD; not sticky, return resets to the default branch")
 }
 
 func getRunE(cmd *cobra.Command, args []string) error {
