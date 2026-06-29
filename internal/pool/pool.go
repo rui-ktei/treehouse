@@ -42,15 +42,19 @@ type acquireOptions struct {
 	// hook stdout to stderr so the worktree path stays the only stdout line.
 	hookStdout io.Writer
 	hookStderr io.Writer
+	// startRef overrides the ref the worktree's detached HEAD starts at. Empty
+	// means the repository default branch.
+	startRef string
 }
 
 // Acquire reserves a clean worktree from the pool with a short-lived owner
 // reservation (the calling process). It is the backing call for the interactive
 // `treehouse get` subshell.
-func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string) (string, error) {
+func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string, startRef string) (string, error) {
 	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
 		hookStdout: os.Stdout,
 		hookStderr: os.Stderr,
+		startRef:   startRef,
 	})
 }
 
@@ -59,26 +63,27 @@ func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string) (strin
 // until it is released by Release. holder is an optional label recorded with the
 // lease for diagnostics. Post-create hook stdout is routed to stderr so callers
 // can capture the returned path as the sole stdout line.
-func AcquireLease(repoRoot, poolDir string, poolSize int, postCreate []string, holder string) (string, error) {
+func AcquireLease(repoRoot, poolDir string, poolSize int, postCreate []string, holder, startRef string) (string, error) {
 	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
 		lease:       true,
 		leaseHolder: holder,
 		hookStdout:  os.Stderr,
 		hookStderr:  os.Stderr,
+		startRef:    startRef,
 	})
 }
 
 func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts acquireOptions) (string, error) {
-	branch, err := git.GetDefaultBranch(repoRoot)
-	if err != nil {
-		return "", err
-	}
-
 	fmt.Fprintf(os.Stderr, "🌳 Setting up worktree...\n")
 	if git.HasRemote(repoRoot, "origin") {
 		if err := git.Fetch(repoRoot); err != nil {
 			return "", fmt.Errorf("fetch failed: %w", err)
 		}
+	}
+
+	ref, err := resolveStartRef(repoRoot, opts.startRef)
+	if err != nil {
+		return "", err
 	}
 
 	var acquired string
@@ -106,7 +111,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 				continue
 			}
 			// Found an available one — reset it
-			if err := git.ResetWorktree(wt.Path, branch); err != nil {
+			if err := git.ResetWorktree(wt.Path, ref); err != nil {
 				continue
 			}
 			if err := markAcquired(&state.Worktrees[i], opts); err != nil {
@@ -133,7 +138,7 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 			return err
 		}
 
-		if err := git.AddWorktree(repoRoot, wtPath, branch); err != nil {
+		if err := git.AddWorktree(repoRoot, wtPath, ref); err != nil {
 			return fmt.Errorf("failed to create worktree: %w", err)
 		}
 
@@ -164,6 +169,15 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 	return acquired, nil
 }
 
+// resolveStartRef picks the concrete ref a newly acquired worktree starts at:
+// the caller-supplied override when set, otherwise the repository default branch.
+func resolveStartRef(repoRoot, startRef string) (string, error) {
+	if startRef != "" {
+		return git.ResolveStartRef(repoRoot, startRef)
+	}
+	return git.DefaultBranchRef(repoRoot)
+}
+
 // markAcquired stamps an acquired worktree entry: a durable lease in lease mode,
 // otherwise the default short-lived owner reservation.
 func markAcquired(wt *WorktreeEntry, opts acquireOptions) error {
@@ -186,7 +200,7 @@ func Release(poolDir, worktreePath string) error {
 	if err != nil {
 		return err
 	}
-	branch, err := git.GetDefaultBranch(repoRoot)
+	ref, err := git.DefaultBranchRef(repoRoot)
 	if err != nil {
 		return err
 	}
@@ -204,7 +218,7 @@ func Release(poolDir, worktreePath string) error {
 	}); err != nil {
 		return err
 	}
-	if err := git.ResetWorktree(worktreePath, branch); err != nil {
+	if err := git.ResetWorktree(worktreePath, ref); err != nil {
 		return err
 	}
 	return WithStateLock(poolDir, func() error {

@@ -137,8 +137,33 @@ func isAncestor(repoRoot, a, b string) bool {
 	return err == nil
 }
 
-func AddWorktree(repoRoot, path, branch string) error {
-	_, err := runGit(repoRoot, "worktree", "add", "--detach", path, branchRef(repoRoot, branch))
+// DefaultBranchRef resolves the repository default branch to a concrete ref
+// (the most-ahead of the local and origin-tracking refs) for checkout.
+func DefaultBranchRef(repoRoot string) (string, error) {
+	branch, err := GetDefaultBranch(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return branchRef(repoRoot, branch), nil
+}
+
+// ResolveStartRef resolves a caller-supplied starting ref to a concrete ref
+// usable for checkout. It accepts a branch name, remote-tracking ref, tag, or
+// commit SHA, using the ref directly when git can verify it. A bare branch name
+// that is not directly resolvable falls back to the local-vs-origin expansion
+// used for the default branch.
+func ResolveStartRef(repoRoot, ref string) (string, error) {
+	if refExists(repoRoot, ref) {
+		return ref, nil
+	}
+	if expanded := branchRef(repoRoot, ref); expanded != ref && refExists(repoRoot, expanded) {
+		return expanded, nil
+	}
+	return "", fmt.Errorf("cannot resolve ref %q", ref)
+}
+
+func AddWorktree(repoRoot, path, ref string) error {
+	_, err := runGit(repoRoot, "worktree", "add", "--detach", path, ref)
 	return err
 }
 
@@ -161,19 +186,14 @@ func Fetch(repoRoot string) error {
 	return err
 }
 
-func ResetWorktree(worktreePath, branch string) error {
-	repoRoot, err := runGit(worktreePath, "rev-parse", "--show-toplevel")
-	if err != nil {
-		repoRoot = worktreePath
-	}
-	ref := branchRef(repoRoot, branch)
+func ResetWorktree(worktreePath, ref string) error {
 	if _, err := runGit(worktreePath, "checkout", "--detach", "--force", ref); err != nil {
 		return err
 	}
 	if _, err := runGit(worktreePath, "reset", "--hard", ref); err != nil {
 		return err
 	}
-	_, err = runGit(worktreePath, "clean", "-fd")
+	_, err := runGit(worktreePath, "clean", "-fd")
 	return err
 }
 
