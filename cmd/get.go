@@ -20,6 +20,7 @@ import (
 var (
 	getLease       bool
 	getLeaseHolder string
+	getBranch      string
 )
 
 var getCmd = &cobra.Command{
@@ -36,9 +37,17 @@ running inside it, until you release it with 'treehouse return <path>'.`,
 }
 
 func init() {
-	getCmd.Flags().BoolVar(&getLease, "lease", false, "Durably lease a worktree without opening a subshell; print only its path to stdout")
-	getCmd.Flags().StringVar(&getLeaseHolder, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
+	// Register on both getCmd and rootCmd so the bare `treehouse` alias accepts
+	// the same flags as `treehouse get`, which it delegates to.
+	addGetFlags(getCmd)
+	addGetFlags(rootCmd)
 	rootCmd.AddCommand(getCmd)
+}
+
+func addGetFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&getLease, "lease", false, "Durably lease a worktree without opening a subshell; print only its path to stdout")
+	cmd.Flags().StringVar(&getLeaseHolder, "lease-holder", "", "Optional label recorded as the lease holder (defaults to $TREEHOUSE_LEASE_HOLDER)")
+	cmd.Flags().StringVar(&getBranch, "branch", "", "Starting ref (branch, tag, or commit) for the worktree's HEAD; not sticky, return resets to the default branch")
 }
 
 func getRunE(cmd *cobra.Command, args []string) error {
@@ -65,7 +74,7 @@ func getRunE(cmd *cobra.Command, args []string) error {
 		return getLeaseRunE(repoRoot, poolDir, cfg)
 	}
 
-	wtPath, err := pool.Acquire(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate)
+	wtPath, err := pool.Acquire(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, getBranch)
 	if err != nil {
 		return err
 	}
@@ -114,7 +123,7 @@ func getLeaseRunE(repoRoot, poolDir string, cfg config.Config) error {
 		holder = os.Getenv("TREEHOUSE_LEASE_HOLDER")
 	}
 
-	wtPath, err := pool.AcquireLease(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder)
+	wtPath, err := pool.AcquireLease(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, getBranch)
 	if err != nil {
 		return err
 	}

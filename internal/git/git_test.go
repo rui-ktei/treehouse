@@ -101,6 +101,88 @@ func TestRemoveCleanWorktreeRejectsDirtyWorktree(t *testing.T) {
 	}
 }
 
+func TestResolveStartRefAcceptsBranchTagCommitAndRemoteRef(t *testing.T) {
+	base := t.TempDir()
+	bareDir := filepath.Join(base, "remote.git")
+	repoDir := filepath.Join(base, "repo")
+
+	mustGit(t, "", "init", "--bare", "--initial-branch=main", bareDir)
+	mustGit(t, "", "init", "--initial-branch=main", repoDir)
+	mustGit(t, repoDir, "config", "user.email", "test@test.com")
+	mustGit(t, repoDir, "config", "user.name", "Test")
+	mustGit(t, repoDir, "remote", "add", "origin", bareDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repoDir, "add", ".")
+	mustGit(t, repoDir, "commit", "-m", "initial")
+	mustGit(t, repoDir, "push", "-u", "origin", "main")
+
+	mustGit(t, repoDir, "checkout", "-b", "feature-x")
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repoDir, "add", ".")
+	mustGit(t, repoDir, "commit", "-m", "feature")
+	mustGit(t, repoDir, "tag", "v1")
+	mustGit(t, repoDir, "push", "origin", "feature-x")
+	mustGit(t, repoDir, "fetch", "origin")
+	featureSHA := revParse(t, repoDir, "HEAD")
+	mustGit(t, repoDir, "checkout", "main")
+
+	cases := []struct {
+		name string
+		ref  string
+	}{
+		{"local branch", "feature-x"},
+		{"tag", "v1"},
+		{"commit sha", featureSHA},
+		{"remote-tracking ref", "origin/feature-x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, err := ResolveStartRef(repoDir, tc.ref)
+			if err != nil {
+				t.Fatalf("ResolveStartRef(%q) failed: %v", tc.ref, err)
+			}
+			if got := revParse(t, repoDir, resolved); got != featureSHA {
+				t.Fatalf("ResolveStartRef(%q) -> %q resolves to %s, want %s", tc.ref, resolved, got, featureSHA)
+			}
+		})
+	}
+
+	t.Run("bare name falls back to origin expansion", func(t *testing.T) {
+		mustGit(t, repoDir, "branch", "-D", "feature-x")
+		resolved, err := ResolveStartRef(repoDir, "feature-x")
+		if err != nil {
+			t.Fatalf("ResolveStartRef fallback failed: %v", err)
+		}
+		if resolved != remoteTrackingRef("origin", "feature-x") {
+			t.Fatalf("expected fallback to origin tracking ref, got %q", resolved)
+		}
+		if got := revParse(t, repoDir, resolved); got != featureSHA {
+			t.Fatalf("fallback ref resolves to %s, want %s", got, featureSHA)
+		}
+	})
+
+	t.Run("unresolvable ref errors", func(t *testing.T) {
+		if _, err := ResolveStartRef(repoDir, "does-not-exist"); err == nil {
+			t.Fatal("expected error for unresolvable ref")
+		}
+	})
+}
+
+func revParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", ref+"^{commit}")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s failed: %v", ref, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func mustGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

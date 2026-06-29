@@ -161,6 +161,7 @@ The default treehouse root is `~/.treehouse/`.
 | --------- | --------- | --------------------------------- |
 | `get`     | `--lease` | Durably lease the worktree without opening a subshell; print only its path to stdout |
 | `get`     | `--lease-holder` | Optional label recorded as the lease holder (defaults to `$TREEHOUSE_LEASE_HOLDER`) |
+| `get`     | `--branch` | Starting ref (branch, tag, or commit) for the worktree's HEAD; not sticky across `return` |
 | `return`  | `--force` | Clean, reset, and return without prompting |
 | `prune`   | `--yes`   | Delete listed prune candidates instead of doing a dry run |
 | `prune`   | `--all`   | Sweep every managed pool under the user-level treehouse root |
@@ -172,6 +173,24 @@ The default treehouse root is `~/.treehouse/`.
 | `destroy` | `--include-unlanded` | Also remove dirty, unmerged, or unverified worktrees (irreversible data loss) |
 | `destroy` | `--include-in-use` | Also remove worktrees with a running process or owner reservation (processes are terminated cleanly first) |
 | `destroy` | `--include-leased` | Also remove a leased worktree; only when the exact path is named, never via `--all` |
+
+### Starting a worktree on a different ref
+
+By default a worktree's detached HEAD starts at the repository's resolved default branch.
+Pass `--branch <ref>` to start it somewhere else:
+
+```sh
+treehouse get --branch feature-x          # subshell on feature-x's HEAD
+path=$(treehouse get --lease --branch v1.2.0)   # leased worktree on a tag
+```
+
+`<ref>` may be a local branch, a remote-tracking ref (e.g. `origin/feature-x`), a tag, or a commit SHA.
+treehouse fetches `origin` first, then resolves the ref, so a just-pushed branch is reachable.
+The override applies whether the pool creates a fresh worktree or resets and reuses an existing one, and works the same for `get` and `get --lease`.
+An unresolvable ref fails before any worktree is created or reset.
+
+The override is per-acquire, not sticky: returning the worktree to the pool resets it to the default branch like any other.
+The worktree stays detached - `--branch` selects a starting point, it does not create or check out a branch.
 
 ### Leasing a worktree (no subshell)
 
