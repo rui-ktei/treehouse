@@ -1,5 +1,6 @@
 .PHONY: build test fmt lint dist install clean demo
 
+GOPATH ?= $(shell go env GOPATH)
 VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION)
 
@@ -26,7 +27,7 @@ dist:
 	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/treehouse-windows-amd64.exe .
 
 install: build
-	cp treehouse $(GOPATH)/bin/ 2>/dev/null || cp treehouse /usr/local/bin/
+	cp treehouse $(GOPATH)/bin/
 
 demo: build
 	vhs demo.tape
