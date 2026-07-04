@@ -33,11 +33,14 @@ func Load(repoRoot string) (Config, error) {
 
 	repoPath := filepath.Join(repoRoot, "treehouse.toml")
 	hasRepoConfig := false
+	repoSetSyncIgnored := false
 	if _, err := os.Stat(repoPath); err == nil {
 		hasRepoConfig = true
-		if _, err := toml.DecodeFile(repoPath, &cfg); err != nil {
+		meta, err := toml.DecodeFile(repoPath, &cfg)
+		if err != nil {
 			return cfg, err
 		}
+		repoSetSyncIgnored = meta.IsDefined("sync_ignored")
 		cfg.Hooks = Hooks{}
 	}
 
@@ -50,6 +53,9 @@ func Load(repoRoot string) (Config, error) {
 			cfg = userCfg
 		} else {
 			cfg.Hooks = userCfg.Hooks
+			if !repoSetSyncIgnored {
+				cfg.SyncIgnored = userCfg.SyncIgnored
+			}
 		}
 	}
 

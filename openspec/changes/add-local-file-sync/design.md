@@ -32,7 +32,7 @@ Restricting to ignored files is not a convenience, it is the correctness mechani
 - `git clean -fd` does not remove ignored files (it would need `-x`), so a synced file survives a reuse reset rather than being deleted and re-created churnwise.
 - The same committed `.gitignore` governs both the source clone and the worktree, so a file ignored in the source is ignored in the worktree by construction.
 
-Enumerating through git (rather than walking the filesystem) also means the scan never descends into large ignored trees like `node_modules`, `bin`, or `obj`; git already knows the ignore set, and the glob filter keeps only the intended files.
+Enumerating through git (rather than walking the filesystem by hand) still means `git ls-files --others --ignored --exclude-standard` lists every individual file inside an ignored directory, not just the directory name, so a large ignored tree like `node_modules`, `bin`, or `obj` adds enumeration cost proportional to its size on every acquire. `--directory` was considered to collapse ignored directories to their own name, but rejected: it would break basename glob matching for files nested inside tracked directories, and the source repo's ignored trees are expected to be small relative to `git fetch`/`git worktree add` cost.
 Alternative considered: copy any file matching the glob regardless of ignore status, then neutralize it via `.git/info/exclude` in the worktree. Rejected as more complex and more surprising than simply scoping to files git already ignores.
 
 ### Run inside `acquire`, after create/reset and before hooks
@@ -65,7 +65,7 @@ The glob set is threaded into the shared `acquire` core through a new `acquireOp
 ## Risks / Trade-offs
 
 - [A local file is untracked but not gitignored] then it is intentionally not synced, and the developer's problem persists. Mitigation: document that only ignored files are mirrored and that the fix is to gitignore the file, which is the correct convention for local-only config anyway. This is preferred over silently making worktrees dirty.
-- [Sync latency on acquire] a `git ls-files` invocation plus a handful of small file copies is negligible next to the existing `git fetch` and `git worktree add`, and the enumeration is empty-fast when nothing matches.
+- [Sync latency on acquire] a `git ls-files` invocation plus a handful of small file copies is negligible next to the existing `git fetch` and `git worktree add` for typical repos, but the enumeration lists every file inside a large ignored tree (see above), so a repo with a very large `node_modules`/`vendor`/build-output tree will see enumeration cost scale with that tree's size regardless of how few files ultimately match the glob.
 - [Repo-level config now influences file copying] the influence is bounded to copying files that already exist and are already ignored in the developer's own clone; no path outside the source working tree is read and no command is executed, so the risk profile is far below that of hooks.
 - [A stale synced file lingers after the source file is deleted] a subsequent acquire overwrites present files but does not prune removed ones. Accepted for v1 as low-impact; deletion-sync can be revisited if it proves confusing.
 - [Windows path handling] enumeration uses `git ls-files` (slash-separated, portable) and copying uses `filepath.Join` plus Go stdlib file I/O, with no hardcoded separators, per the project's Windows-compatibility rules.
