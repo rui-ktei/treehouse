@@ -134,6 +134,7 @@ The default treehouse root is `~/.treehouse/`.
 - **In-use detection** — treehouse scans running processes and short-lived owner reservations to determine which worktrees are in-use. Reservations are persisted only while `get`, `destroy`, and `prune` lifecycle work is running.
 - **Durable leases** — `treehouse get --lease` reserves a worktree as a persistent home without keeping a process inside it. The lease is recorded in treehouse's own state, so the worktree is never handed out by a later `get` and never removed by `prune` until you release it with `treehouse return`. Unlike process-based in-use detection, a lease survives with zero processes running inside the worktree.
 - **Dirty detection** - treehouse treats tracked changes and untracked files as dirty, even when repository config hides untracked files from normal `git status` output.
+- **Local file sync** - gitignored local dev config (default `appsettings*.local.json`) is mirrored into every acquired worktree automatically, without ever making it read as dirty. See [Local file sync](#local-file-sync).
 - **Safe pruning** - By default, `treehouse prune` removes only idle managed worktrees whose HEAD is already merged into the default branch and whose working tree is clean.
   `treehouse prune --all` applies the same safety checks across every managed pool under the user-level treehouse root.
   Backing-repository-missing orphans are reported by default; `--prune-orphans` includes them as unverified prune candidates, and `--yes` is required before deletion.
