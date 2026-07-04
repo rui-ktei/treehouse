@@ -10,6 +10,7 @@ Treehouse is a Go CLI tool that manages a pool of git worktrees for parallel AI 
 - `cmd/` - CLI commands (cobra): `get` (incl. `get --lease`), `return`, `status`, `prune`, `destroy`
 - `internal/config/` - config file loading (`treehouse.toml`)
 - `internal/hooks/` - user-configured lifecycle hook command execution
+- `internal/localsync/` - copies gitignored local files (e.g. `appsettings*.local.json`) from the source repo into an acquired worktree
 - `internal/pool/` - pool manager (acquire, release, list, destroy, prune) + state file
 - `internal/git/` - git operations (shells out to `git` binary)
 - `internal/process/` - in-use detection and lingering process termination for worktrees
@@ -52,6 +53,7 @@ make test
   It still does not infer long-term usage from processes.
 - Git operations shell out to `git` (go-git has incomplete worktree support)
 - Self-healing: stale state entries are auto-removed
+- Local file sync (`internal/localsync`) mirrors gitignored local dev config (default glob `appsettings*.local.json`, configurable via `sync_ignored`) into every acquired worktree, on both the fresh-create and reuse/reset paths, after create/reset and before `post_create` hooks. The load-bearing invariant: only files git reports as ignored (`git.ListIgnoredFiles`, i.e. `git ls-files --others --ignored --exclude-standard`) are ever copied - never a broader untracked-but-not-ignored set - so `git status --porcelain` stays clean and `git clean -fd` still preserves the file, meaning the sync can never interfere with dirty detection, `Acquire` reuse eligibility, `return`'s dirty prompt, or prune/destroy classification. Copies overwrite existing destination files on every acquire (copy, not symlink, since config files may be written to at runtime and worktrees must stay independent). Unlike `Hooks`, `SyncIgnored` runs no commands, so `config.Load` honors it from both repo- and user-level `treehouse.toml`, with repo config winning only when it explicitly sets the key (`config.Load` tracks `repoSetSyncIgnored` via the TOML decode metadata so an unset repo key falls through to the user-level value instead of silently zeroing it)
 
 ## Windows Compatibility
 
@@ -75,10 +77,14 @@ max_trees = 16
 # Relative roots need a repo context; use an absolute user-level root for global prune.
 # root = "$HOME/worktrees"
 
+# Basename globs of gitignored local files to mirror into every acquired
+# worktree. Defaults to ["appsettings*.local.json"] when unset; [] disables it.
+# sync_ignored = ["appsettings*.local.json", ".env.local"]
+
 # User-level config only:
 [hooks]
 post_create = ["./scripts/setup-venv.sh"]
 pre_destroy = ["./scripts/teardown.sh"]
 ```
 
-Hooks are ignored in repo-level config for safety.
+Hooks are ignored in repo-level config for safety. `sync_ignored` is honored in both repo- and user-level config since it only ever copies files git already ignores and never runs commands.

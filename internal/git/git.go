@@ -300,6 +300,20 @@ func IsDirty(worktreePath string) (bool, error) {
 	return out != "", nil
 }
 
+// ListIgnoredFiles returns paths, relative to sourceRepo and slash-separated,
+// of files in sourceRepo's working tree that git reports as ignored. Tracked
+// files and untracked-but-not-ignored files are excluded.
+func ListIgnoredFiles(sourceRepo string) ([]string, error) {
+	out, err := runGit(sourceRepo, "ls-files", "--others", "--ignored", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 func ShortHash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", h[:3])

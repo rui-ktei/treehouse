@@ -108,7 +108,7 @@ func TestAcquire_StartsNewWorktreeOnSpecifiedBranch(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 	featureSHA := commitFeatureBranch(t, repoDir, "feature-x")
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "feature-x")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "feature-x", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAcquire_ResetsReusedWorktreeToSpecifiedBranch(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 	featureSHA := commitFeatureBranch(t, repoDir, "feature-x")
 
-	first, err := Acquire(repoDir, poolDir, 4, nil, "")
+	first, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("first Acquire failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestAcquire_ResetsReusedWorktreeToSpecifiedBranch(t *testing.T) {
 		t.Fatalf("Release failed: %v", err)
 	}
 
-	reused, err := Acquire(repoDir, poolDir, 4, nil, "feature-x")
+	reused, err := Acquire(repoDir, poolDir, 4, nil, "feature-x", nil)
 	if err != nil {
 		t.Fatalf("Acquire with branch override failed: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestAcquire_ResetsReusedWorktreeToSpecifiedBranch(t *testing.T) {
 func TestAcquire_RejectsInvalidStartRefWithoutCreatingWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	if _, err := Acquire(repoDir, poolDir, 4, nil, "does-not-exist"); err == nil {
+	if _, err := Acquire(repoDir, poolDir, 4, nil, "does-not-exist", nil); err == nil {
 		t.Fatal("expected Acquire to reject an unresolvable ref")
 	}
 
@@ -165,7 +165,7 @@ func TestAcquire_BranchOverrideIsNotStickyAcrossReturn(t *testing.T) {
 	featureSHA := commitFeatureBranch(t, repoDir, "feature-x")
 	defaultSHA := gitOut(t, repoDir, "rev-parse", "HEAD")
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "feature-x")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "feature-x", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -184,12 +184,114 @@ func TestAcquireLease_HonorsSpecifiedBranch(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 	featureSHA := commitFeatureBranch(t, repoDir, "feature-x")
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "feature-x")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "feature-x", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
 	if got := gitOut(t, wtPath, "rev-parse", "HEAD"); got != featureSHA {
 		t.Fatalf("expected leased worktree at feature %s, got %s", featureSHA, got)
+	}
+}
+
+func TestAcquire_SyncsIgnoredLocalFileIntoFreshWorktree(t *testing.T) {
+	repoDir, poolDir := setupRepo(t)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "commit", "-m", "ignore local settings")
+	if err := os.WriteFile(filepath.Join(repoDir, "appsettings.local.json"), []byte(`{"v":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", []string{"appsettings*.local.json"})
+	if err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(wtPath, "appsettings.local.json"))
+	if err != nil {
+		t.Fatalf("expected synced ignored file in fresh worktree: %v", err)
+	}
+	if string(got) != `{"v":1}` {
+		t.Fatalf("unexpected synced content: %q", got)
+	}
+}
+
+func TestAcquire_SyncsIgnoredLocalFileIntoReusedWorktree(t *testing.T) {
+	repoDir, poolDir := setupRepo(t)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "commit", "-m", "ignore local settings")
+
+	localPath := filepath.Join(repoDir, "appsettings.local.json")
+	if err := os.WriteFile(localPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globs := []string{"appsettings*.local.json"}
+
+	first, err := Acquire(repoDir, poolDir, 4, nil, "", globs)
+	if err != nil {
+		t.Fatalf("first Acquire failed: %v", err)
+	}
+	if err := Release(poolDir, first); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+
+	if err := os.WriteFile(localPath, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reused, err := Acquire(repoDir, poolDir, 4, nil, "", globs)
+	if err != nil {
+		t.Fatalf("second Acquire failed: %v", err)
+	}
+	if reused != first {
+		t.Fatalf("expected reuse of %s, got %s", first, reused)
+	}
+
+	got, err := os.ReadFile(filepath.Join(reused, "appsettings.local.json"))
+	if err != nil {
+		t.Fatalf("expected synced ignored file in reused worktree: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("expected refreshed content %q, got %q", "new", got)
+	}
+}
+
+func TestAcquire_SyncedIgnoredFileDoesNotMakeWorktreeDirty(t *testing.T) {
+	repoDir, poolDir := setupRepo(t)
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repoDir, "add", ".gitignore")
+	runGit(t, repoDir, "commit", "-m", "ignore local settings")
+	if err := os.WriteFile(filepath.Join(repoDir, "appsettings.local.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", []string{"appsettings*.local.json"})
+	if err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+
+	status := gitOut(t, wtPath, "status", "--porcelain", "--untracked-files=all")
+	if status != "" {
+		t.Fatalf("expected worktree with synced ignored file to be clean, got status: %q", status)
+	}
+
+	if err := Release(poolDir, wtPath); err != nil {
+		t.Fatalf("expected Release to succeed without dirty prompt: %v", err)
+	}
+
+	reused, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
+	if err != nil {
+		t.Fatalf("expected worktree with synced ignored file to be reusable: %v", err)
+	}
+	if reused != wtPath {
+		t.Fatalf("expected worktree %s to be reused, got %s", wtPath, reused)
 	}
 }
 
@@ -199,7 +301,7 @@ func TestAcquire_RunsPostCreateHookInWorktree(t *testing.T) {
 	// `echo X > sentinel.txt` works in both /bin/sh and cmd.exe.
 	hook := "echo created > hook-sentinel.txt"
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, []string{hook}, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, []string{hook}, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -221,7 +323,7 @@ func TestAcquire_HookFailureDoesNotFailAcquire(t *testing.T) {
 		"echo ok > second-ran.txt",
 	}
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, hooks, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, hooks, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire should not fail when a hook fails: %v", err)
 	}
@@ -240,7 +342,7 @@ func TestAcquire_RunsPostCreateHookAfterReleasingStateLock(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "lock-probe.txt")
 	hook := quoteForShell(os.Args[0]) + " -test.run=TestHookLockProbe -- " + quoteForShell(poolDir) + " " + quoteForShell(sentinel)
 
-	if _, err := Acquire(repoDir, poolDir, 4, []string{hook}, ""); err != nil {
+	if _, err := Acquire(repoDir, poolDir, 4, []string{hook}, "", nil); err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
 
@@ -259,7 +361,7 @@ func TestAcquire_DoesNotReuseWorktreeReservedByPostCreateHook(t *testing.T) {
 	hookCwd := t.TempDir()
 	hook := quoteForShell(os.Args[0]) + " -test.run=TestAcquireDuringHookProbe -- " + quoteForShell(repoDir) + " " + quoteForShell(poolDir) + " " + quoteForShell(sentinel) + " " + quoteForShell(hookCwd)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, []string{hook}, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, []string{hook}, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -277,7 +379,7 @@ func TestAcquire_DoesNotReuseWorktreeReservedByPostCreateHook(t *testing.T) {
 func TestRelease_DoesNotDependOnCurrentWorkingDirectory(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -303,7 +405,7 @@ func TestRelease_DoesNotDependOnCurrentWorkingDirectory(t *testing.T) {
 func TestList_RecoversDestroyingWorktreeWhenOwnerIsGone(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -341,7 +443,7 @@ func TestList_RecoversDestroyingWorktreeWhenOwnerIsGone(t *testing.T) {
 func TestList_RecoversDestroyingWorktreeWhenOwnerIdentityDoesNotMatch(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -380,7 +482,7 @@ func TestList_RecoversDestroyingWorktreeWhenOwnerIdentityDoesNotMatch(t *testing
 func TestList_ShowsReservedWorktreeAsInUse(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -426,7 +528,7 @@ func TestHookLockProbe(t *testing.T) {
 // no opt-in flags.
 func acquireDisposable(t *testing.T, repoDir, poolDir string) string {
 	t.Helper()
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -535,7 +637,7 @@ func TestDestroyWorktree_DoesNotReusePendingDestroyWorktreeInHook(t *testing.T) 
 func TestDestroyWorktree_WithoutIncludeInUseSkipsInUseWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -668,7 +770,7 @@ func TestDestroyWorktree_DirtyRequiresIncludeUnlanded(t *testing.T) {
 func TestDestroyWorktree_LeasedDirtyRequiresBothFlags(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -702,7 +804,7 @@ func TestDestroyWorktree_LeasedDirtyRequiresBothFlags(t *testing.T) {
 func TestDestroyWorktree_InUseDirtyRequiresBothFlags(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -736,7 +838,7 @@ func TestDestroyWorktree_InUseDirtyRequiresBothFlags(t *testing.T) {
 func TestDestroyWorktree_LeasedProcessRequiresIncludeInUse(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -867,7 +969,7 @@ func TestDestroyWorktree_FinalSafetySkipsHookDirty(t *testing.T) {
 func TestDestroyWorktree_FinalSafetySkipRestoresOriginalOwnerReservation(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1041,7 +1143,7 @@ func TestExecuteDestroy_ReResolvesRepoRootWhenMissing(t *testing.T) {
 func TestExecuteDestroy_RemovalFailureRestoresOriginalOwnerReservation(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1091,10 +1193,10 @@ func TestExecuteDestroy_RemovalFailureRestoresOriginalOwnerReservation(t *testin
 func TestDestroyPool_PreservesWorktreeAcquiredByHook(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	if _, err := Acquire(repoDir, poolDir, 4, nil, ""); err != nil {
+	if _, err := Acquire(repoDir, poolDir, 4, nil, "", nil); err != nil {
 		t.Fatalf("first Acquire failed: %v", err)
 	}
-	if _, err := Acquire(repoDir, poolDir, 4, nil, ""); err != nil {
+	if _, err := Acquire(repoDir, poolDir, 4, nil, "", nil); err != nil {
 		t.Fatalf("second Acquire failed: %v", err)
 	}
 
@@ -1152,7 +1254,7 @@ func TestDestroyPool_PreservesSupersededReservationAfterHook(t *testing.T) {
 func TestDestroyPool_WithoutIncludeInUseSkipsInUseWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1211,7 +1313,7 @@ func TestDestroyPool_SkipsLiveDestroyingWorktree(t *testing.T) {
 func TestPruneDryRunDoesNotDeleteAvailableWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1237,7 +1339,7 @@ func TestPruneDryRunDoesNotDeleteAvailableWorktree(t *testing.T) {
 func TestPruneRemovesAvailableWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1271,7 +1373,7 @@ func TestPruneRemovesAvailableWorktree(t *testing.T) {
 func TestPrunePoolDerivesRepoContextFromManagedWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1307,7 +1409,7 @@ func TestPrunePoolDerivesRepoContextFromManagedWorktree(t *testing.T) {
 func TestPruneAllReportsBackingMissingOrphanWithoutDeletingByDefault(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1339,7 +1441,7 @@ func TestPruneAllReportsBackingMissingOrphanWithoutDeletingByDefault(t *testing.
 func TestPruneAllPrunesBackingMissingOrphanOnlyWithExplicitFlag(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1393,7 +1495,7 @@ func TestPruneAllPrunesBackingMissingOrphanOnlyWithExplicitFlag(t *testing.T) {
 func TestPruneAllNeverDeletesOriginUnreachableWithPruneOrphans(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1425,7 +1527,7 @@ func TestPruneAllSkipsUnsafeWorktreesAcrossPools(t *testing.T) {
 
 	safeRepo, _ := setupRepo(t)
 	safePool := filepath.Join(poolRoot, "safe")
-	safePath, err := Acquire(safeRepo, safePool, 4, nil, "")
+	safePath, err := Acquire(safeRepo, safePool, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire safe failed: %v", err)
 	}
@@ -1435,7 +1537,7 @@ func TestPruneAllSkipsUnsafeWorktreesAcrossPools(t *testing.T) {
 
 	dirtyRepo, _ := setupRepo(t)
 	dirtyPool := filepath.Join(poolRoot, "dirty")
-	dirtyPath, err := Acquire(dirtyRepo, dirtyPool, 4, nil, "")
+	dirtyPath, err := Acquire(dirtyRepo, dirtyPool, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire dirty failed: %v", err)
 	}
@@ -1449,14 +1551,14 @@ func TestPruneAllSkipsUnsafeWorktreesAcrossPools(t *testing.T) {
 
 	inUseRepo, _ := setupRepo(t)
 	inUsePool := filepath.Join(poolRoot, "in-use")
-	inUsePath, err := Acquire(inUseRepo, inUsePool, 4, nil, "")
+	inUsePath, err := Acquire(inUseRepo, inUsePool, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire in-use failed: %v", err)
 	}
 
 	unmergedRepo, _ := setupRepo(t)
 	unmergedPool := filepath.Join(poolRoot, "unmerged")
-	unmergedPath, err := Acquire(unmergedRepo, unmergedPool, 4, nil, "")
+	unmergedPath, err := Acquire(unmergedRepo, unmergedPool, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire unmerged failed: %v", err)
 	}
@@ -1496,7 +1598,7 @@ func TestPruneAllSkipsUnsafeWorktreesAcrossPools(t *testing.T) {
 func TestPruneInUseWorktreeDoesNotRequireOrigin(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1520,7 +1622,7 @@ func TestPruneInUseWorktreeDoesNotRequireOrigin(t *testing.T) {
 func TestPruneSkipsDirtyWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1550,7 +1652,7 @@ func TestPruneSkipsDirtyWorktree(t *testing.T) {
 func TestPruneSkipsUnmergedCommit(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1582,7 +1684,7 @@ func TestPruneSkipsUnmergedCommit(t *testing.T) {
 func TestPruneRefreshesOriginBeforeMergeSafety(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1622,7 +1724,7 @@ func TestPruneRefreshesOriginBeforeMergeSafety(t *testing.T) {
 func TestPruneUsesRemoteTrackingDefaultRefNotShadowingBranch(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1663,7 +1765,7 @@ func TestPruneUsesRemoteTrackingDefaultRefNotShadowingBranch(t *testing.T) {
 func TestPruneUsesFullLocalDefaultRefWithoutOrigin(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1699,7 +1801,7 @@ func TestPruneUsesFullLocalDefaultRefWithoutOrigin(t *testing.T) {
 func TestPruneIgnoresStaleOriginHeadWhenOriginIsAbsent(t *testing.T) {
 	repoDir, poolDir := setupLocalRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1735,7 +1837,7 @@ func TestPruneIgnoresStaleOriginHeadWhenOriginIsAbsent(t *testing.T) {
 func TestPruneSkipsWhenRemoteDefaultTrackingRefIsStale(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1783,7 +1885,7 @@ func TestPruneSkipsWhenRemoteDefaultTrackingRefIsStale(t *testing.T) {
 func TestRelease_RejectsDestroyingWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1831,7 +1933,7 @@ func TestRelease_RejectsDestroyingWorktree(t *testing.T) {
 func TestAcquireLease_MarksWorktreeLeasedInState(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "secondmate-home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "secondmate-home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -1862,14 +1964,14 @@ func TestAcquireLease_MarksWorktreeLeasedInState(t *testing.T) {
 func TestAcquireLease_NotHandedOutBySubsequentAcquire(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	leased, err := AcquireLease(repoDir, poolDir, 4, nil, "", "")
+	leased, err := AcquireLease(repoDir, poolDir, 4, nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
 
 	// A plain acquire must never reuse the leased worktree even though no
 	// process runs inside it.
-	next, err := Acquire(repoDir, poolDir, 4, nil, "")
+	next, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
@@ -1881,13 +1983,13 @@ func TestAcquireLease_NotHandedOutBySubsequentAcquire(t *testing.T) {
 func TestAcquireLease_ExhaustsPoolWhenAllLeased(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	if _, err := AcquireLease(repoDir, poolDir, 1, nil, "", ""); err != nil {
+	if _, err := AcquireLease(repoDir, poolDir, 1, nil, "", "", nil); err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
 
 	// With pool size 1 and the only worktree leased, a second acquire cannot
 	// find or create one.
-	if _, err := Acquire(repoDir, poolDir, 1, nil, ""); err == nil {
+	if _, err := Acquire(repoDir, poolDir, 1, nil, "", nil); err == nil {
 		t.Fatal("expected acquire to fail when the only worktree is leased")
 	}
 }
@@ -1895,7 +1997,7 @@ func TestAcquireLease_ExhaustsPoolWhenAllLeased(t *testing.T) {
 func TestPrune_NeverRemovesLeasedWorktreeWithoutProcess(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -1923,7 +2025,7 @@ func TestPrune_NeverRemovesLeasedWorktreeWithoutProcess(t *testing.T) {
 func TestRelease_ClearsLease(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -1953,7 +2055,7 @@ func TestRelease_ClearsLease(t *testing.T) {
 	}
 
 	// After release the worktree becomes available for reuse.
-	reused, err := Acquire(repoDir, poolDir, 4, nil, "")
+	reused, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatalf("Acquire after release failed: %v", err)
 	}
@@ -1965,7 +2067,7 @@ func TestRelease_ClearsLease(t *testing.T) {
 func TestList_ShowsLeasedState(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "secondmate-7", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "secondmate-7", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -1988,7 +2090,7 @@ func TestList_ShowsLeasedState(t *testing.T) {
 func TestHealState_PreservesLease(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -2029,7 +2131,7 @@ func TestHealState_PreservesLease(t *testing.T) {
 func TestDestroyWorktree_LeasedRequiresIncludeLeased(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "home", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -2064,7 +2166,7 @@ func TestDestroyWorktree_LeasedRequiresIncludeLeased(t *testing.T) {
 func TestDestroyPool_NeverRemovesLeasedWorktree(t *testing.T) {
 	repoDir, poolDir := setupRepo(t)
 
-	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "secondmate", "")
+	wtPath, err := AcquireLease(repoDir, poolDir, 4, nil, "secondmate", "", nil)
 	if err != nil {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
@@ -2109,7 +2211,7 @@ func TestAcquireLease_ConcurrentAcquiresNeverDoubleLease(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			paths[i], errs[i] = AcquireLease(repoDir, poolDir, n, nil, "", "")
+			paths[i], errs[i] = AcquireLease(repoDir, poolDir, n, nil, "", "", nil)
 		}(i)
 	}
 	wg.Wait()
@@ -2194,7 +2296,7 @@ func TestAcquireDuringHookProbe(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "")
+	wtPath, err := Acquire(repoDir, poolDir, 4, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

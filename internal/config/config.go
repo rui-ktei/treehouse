@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	MaxTrees int    `toml:"max_trees"`
-	Root     string `toml:"root"`
-	Hooks    Hooks  `toml:"hooks,omitempty"`
+	MaxTrees    int      `toml:"max_trees"`
+	Root        string   `toml:"root"`
+	Hooks       Hooks    `toml:"hooks,omitempty"`
+	SyncIgnored []string `toml:"sync_ignored,omitempty"`
 }
 
 type Hooks struct {
@@ -22,7 +23,8 @@ type Hooks struct {
 
 func DefaultConfig() Config {
 	return Config{
-		MaxTrees: 16,
+		MaxTrees:    16,
+		SyncIgnored: []string{"appsettings*.local.json"},
 	}
 }
 
@@ -31,11 +33,14 @@ func Load(repoRoot string) (Config, error) {
 
 	repoPath := filepath.Join(repoRoot, "treehouse.toml")
 	hasRepoConfig := false
+	repoSetSyncIgnored := false
 	if _, err := os.Stat(repoPath); err == nil {
 		hasRepoConfig = true
-		if _, err := toml.DecodeFile(repoPath, &cfg); err != nil {
+		meta, err := toml.DecodeFile(repoPath, &cfg)
+		if err != nil {
 			return cfg, err
 		}
+		repoSetSyncIgnored = meta.IsDefined("sync_ignored")
 		cfg.Hooks = Hooks{}
 	}
 
@@ -48,6 +53,9 @@ func Load(repoRoot string) (Config, error) {
 			cfg = userCfg
 		} else {
 			cfg.Hooks = userCfg.Hooks
+			if !repoSetSyncIgnored {
+				cfg.SyncIgnored = userCfg.SyncIgnored
+			}
 		}
 	}
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/treehouse/internal/git"
 	"github.com/kunchenguid/treehouse/internal/hooks"
+	"github.com/kunchenguid/treehouse/internal/localsync"
 	"github.com/kunchenguid/treehouse/internal/process"
 )
 
@@ -45,16 +46,20 @@ type acquireOptions struct {
 	// startRef overrides the ref the worktree's detached HEAD starts at. Empty
 	// means the repository default branch.
 	startRef string
+	// syncIgnored is the basename glob set of gitignored source files to mirror
+	// into the acquired worktree. Empty disables the sync.
+	syncIgnored []string
 }
 
 // Acquire reserves a clean worktree from the pool with a short-lived owner
 // reservation (the calling process). It is the backing call for the interactive
 // `treehouse get` subshell.
-func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string, startRef string) (string, error) {
+func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string, startRef string, syncIgnored []string) (string, error) {
 	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
-		hookStdout: os.Stdout,
-		hookStderr: os.Stderr,
-		startRef:   startRef,
+		hookStdout:  os.Stdout,
+		hookStderr:  os.Stderr,
+		startRef:    startRef,
+		syncIgnored: syncIgnored,
 	})
 }
 
@@ -63,13 +68,14 @@ func Acquire(repoRoot, poolDir string, poolSize int, postCreate []string, startR
 // until it is released by Release. holder is an optional label recorded with the
 // lease for diagnostics. Post-create hook stdout is routed to stderr so callers
 // can capture the returned path as the sole stdout line.
-func AcquireLease(repoRoot, poolDir string, poolSize int, postCreate []string, holder, startRef string) (string, error) {
+func AcquireLease(repoRoot, poolDir string, poolSize int, postCreate []string, holder, startRef string, syncIgnored []string) (string, error) {
 	return acquire(repoRoot, poolDir, poolSize, postCreate, acquireOptions{
 		lease:       true,
 		leaseHolder: holder,
 		hookStdout:  os.Stderr,
 		hookStderr:  os.Stderr,
 		startRef:    startRef,
+		syncIgnored: syncIgnored,
 	})
 }
 
@@ -163,6 +169,9 @@ func acquire(repoRoot, poolDir string, poolSize int, postCreate []string, opts a
 		return "", err
 	}
 	if runPostCreate {
+		if err := localsync.Sync(repoRoot, acquired, opts.syncIgnored); err != nil {
+			fmt.Fprintf(os.Stderr, "🌳 Warning: failed to sync local files: %v\n", err)
+		}
 		hooks.Run(postCreate, acquired, opts.hookStdout, opts.hookStderr)
 	}
 
