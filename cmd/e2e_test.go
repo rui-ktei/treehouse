@@ -491,6 +491,38 @@ func TestGetLeaseRecordsHolder(t *testing.T) {
 	}
 }
 
+func TestBareAliasAcceptsBranchFlag(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+
+	gitCmd(t, repoDir, "checkout", "-b", "feature-x")
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repoDir, "add", ".")
+	gitCmd(t, repoDir, "commit", "-m", "feature commit")
+	gitCmd(t, repoDir, "push", "-u", "origin", "feature-x")
+	featureSHA := gitCmd(t, repoDir, "rev-parse", "feature-x")
+	gitCmd(t, repoDir, "checkout", "main")
+
+	// The bare `treehouse` alias delegates to getRunE and must accept the same
+	// flags as `treehouse get` (regression test for c61095c, where --branch was
+	// registered only on getCmd and the bare alias failed with "unknown flag").
+	stdout, stderr, code := runTreehouse(t, repoDir, homeDir, nil, "--branch", "feature-x", "--lease")
+	if code != 0 {
+		t.Fatalf("treehouse --branch feature-x --lease failed (code %d): %s", code, stderr)
+	}
+
+	wtPath := strings.TrimSpace(stdout)
+	if wtPath == "" {
+		t.Fatalf("expected leased worktree path on stdout, got stderr:\n%s", stderr)
+	}
+
+	headSHA := gitCmd(t, wtPath, "rev-parse", "HEAD")
+	if headSHA != featureSHA {
+		t.Fatalf("expected worktree HEAD to be feature-x (%s), got %s", featureSHA, headSHA)
+	}
+}
+
 func TestLeasedWorktreeSkippedByGetAndPrune(t *testing.T) {
 	repoDir, homeDir := setupTestRepo(t)
 
