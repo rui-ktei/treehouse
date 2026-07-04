@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	MaxTrees int    `toml:"max_trees"`
-	Root     string `toml:"root"`
-	Hooks    Hooks  `toml:"hooks,omitempty"`
+	MaxTrees    int      `toml:"max_trees"`
+	Root        string   `toml:"root"`
+	Hooks       Hooks    `toml:"hooks,omitempty"`
+	SyncIgnored []string `toml:"sync_ignored,omitempty"`
 }
 
 type Hooks struct {
@@ -22,7 +23,8 @@ type Hooks struct {
 
 func DefaultConfig() Config {
 	return Config{
-		MaxTrees: 16,
+		MaxTrees:    16,
+		SyncIgnored: []string{"appsettings*.local.json"},
 	}
 }
 

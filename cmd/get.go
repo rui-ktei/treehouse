@@ -74,7 +74,7 @@ func getRunE(cmd *cobra.Command, args []string) error {
 		return getLeaseRunE(repoRoot, poolDir, cfg)
 	}
 
-	wtPath, err := pool.Acquire(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, getBranch)
+	wtPath, err := pool.Acquire(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, getBranch, cfg.SyncIgnored)
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func getLeaseRunE(repoRoot, poolDir string, cfg config.Config) error {
 		holder = os.Getenv("TREEHOUSE_LEASE_HOLDER")
 	}
 
-	wtPath, err := pool.AcquireLease(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, getBranch)
+	wtPath, err := pool.AcquireLease(repoRoot, poolDir, cfg.MaxTrees, cfg.Hooks.PostCreate, holder, getBranch, cfg.SyncIgnored)
 	if err != nil {
 		return err
 	}

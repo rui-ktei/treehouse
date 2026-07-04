@@ -291,11 +291,27 @@ max_trees = 16
 # Relative paths are resolved from the repo root for repo-scoped commands.
 # Use an absolute user-level root for treehouse prune --all.
 # root = "$HOME/worktrees"
+
+# Basename globs of gitignored local files to mirror into every acquired
+# worktree. Defaults to ["appsettings*.local.json"] when unset.
+# An empty list disables the feature.
+# sync_ignored = ["appsettings*.local.json", ".env.local"]
 ```
 
 The repo-level config takes precedence for repo-safe settings.
 `treehouse prune --all` can run without a repository, so it uses only the user-level config and does not read per-repo `treehouse.toml` files while sweeping.
 If no config is found, the default pool size is 16.
+
+### Local file sync
+
+`git worktree add` only ever materializes committed files, so gitignored local development config such as `appsettings.local.json` never appears in a freshly acquired worktree.
+`treehouse get` fixes this automatically: on every acquire, it mirrors files that git reports as ignored in your working tree and whose basename matches `sync_ignored` (default `["appsettings*.local.json"]`) into the acquired worktree, preserving each file's relative path.
+
+- Zero configuration is required; the default glob set is on by default.
+- Only files git already ignores are ever copied, so a synced file never makes the worktree read as dirty and never affects `treehouse return` prompting or `treehouse prune`/`treehouse destroy` classification.
+- When nothing matches, the step is a silent no-op.
+- Copies overwrite on each acquire, so a reused pooled worktree always reflects your current local config.
+- Unlike `hooks`, `sync_ignored` runs no commands, so it is honored in both repo-level `treehouse.toml` and user-level config; set it to `[]` to disable.
 
 ### Hooks
 

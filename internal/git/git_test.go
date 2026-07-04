@@ -172,6 +172,75 @@ func TestResolveStartRefAcceptsBranchTagCommitAndRemoteRef(t *testing.T) {
 	})
 }
 
+func TestListIgnoredFiles(t *testing.T) {
+	repoDir := t.TempDir()
+
+	mustGit(t, "", "init", "--initial-branch=main", repoDir)
+	mustGit(t, repoDir, "config", "user.email", "test@test.com")
+	mustGit(t, repoDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repoDir, "add", ".")
+	mustGit(t, repoDir, "commit", "-m", "initial")
+
+	if err := os.MkdirAll(filepath.Join(repoDir, "Api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "Api", "appsettings.local.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "untracked.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ignored, err := ListIgnoredFiles(repoDir)
+	if err != nil {
+		t.Fatalf("ListIgnoredFiles failed: %v", err)
+	}
+
+	want := []string{"Api/appsettings.local.json"}
+	if !slicesEqual(ignored, want) {
+		t.Fatalf("ListIgnoredFiles: got %v, want %v", ignored, want)
+	}
+}
+
+func TestListIgnoredFilesReturnsNilWhenNoneIgnored(t *testing.T) {
+	repoDir := t.TempDir()
+
+	mustGit(t, "", "init", "--initial-branch=main", repoDir)
+	mustGit(t, repoDir, "config", "user.email", "test@test.com")
+	mustGit(t, repoDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repoDir, "add", ".")
+	mustGit(t, repoDir, "commit", "-m", "initial")
+
+	ignored, err := ListIgnoredFiles(repoDir)
+	if err != nil {
+		t.Fatalf("ListIgnoredFiles failed: %v", err)
+	}
+	if len(ignored) != 0 {
+		t.Fatalf("expected no ignored files, got %v", ignored)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func revParse(t *testing.T, dir, ref string) string {
 	t.Helper()
 	cmd := exec.Command("git", "rev-parse", ref+"^{commit}")
