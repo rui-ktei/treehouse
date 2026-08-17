@@ -27,7 +27,9 @@ dist:
 	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/treehouse-windows-amd64.exe .
 
 install: build
-	cp treehouse $(GOPATH)/bin/
+	@mkdir -p $(GOPATH)/bin
+	cp treehouse $(GOPATH)/bin/treehouse.new
+	mv -f $(GOPATH)/bin/treehouse.new $(GOPATH)/bin/treehouse
 
 demo: build
 	vhs demo.tape
